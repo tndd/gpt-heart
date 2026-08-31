@@ -2,6 +2,7 @@
 set -eu
 
 mkdir -p /data/browser /data/state /tmp/raspi-chatgpt-loop
+cleanup-browser-profile /data/browser
 
 Xvfb :99 -screen 0 1440x1000x24 -ac +extension RANDR > /tmp/raspi-chatgpt-loop/xvfb.log 2>&1 &
 
