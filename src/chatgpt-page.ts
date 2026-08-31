@@ -140,6 +140,11 @@ export class ChatGptPage {
   }
 }
 
+function projectIdFromSegment(segment: string | undefined): string | null {
+  const match = /^g-p-([0-9a-f]{32})(?:-|$)/i.exec(segment ?? "");
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 export function isProjectConversationUrl(projectUrl: string, candidateUrl: string): boolean {
   const project = new URL(projectUrl);
   const candidate = new URL(candidateUrl);
@@ -147,12 +152,19 @@ export function isProjectConversationUrl(projectUrl: string, candidateUrl: strin
 
   const projectParts = project.pathname.split("/").filter(Boolean);
   const candidateParts = candidate.pathname.split("/").filter(Boolean);
-  if (projectParts.at(-1) !== "project") return false;
+  if (
+    projectParts.length !== 3 ||
+    projectParts[0] !== "g" ||
+    projectParts[2] !== "project" ||
+    candidateParts.length !== 4 ||
+    candidateParts[0] !== "g" ||
+    candidateParts[2] !== "c" ||
+    !candidateParts[3]
+  ) {
+    return false;
+  }
 
-  const expectedPrefix = [...projectParts.slice(0, -1), "c"];
-  return (
-    candidateParts.length === expectedPrefix.length + 1 &&
-    expectedPrefix.every((part, index) => candidateParts[index] === part) &&
-    (candidateParts.at(-1)?.length ?? 0) > 0
-  );
+  const projectId = projectIdFromSegment(projectParts[1]);
+  const candidateProjectId = projectIdFromSegment(candidateParts[1]);
+  return projectId !== null && candidateProjectId === projectId;
 }
