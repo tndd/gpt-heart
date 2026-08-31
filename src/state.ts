@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename } from "node:fs/promises";
 import path from "node:path";
 import type {
   ConversationProgress,
@@ -20,8 +20,21 @@ async function readJson<T>(file: string, fallback: T): Promise<T> {
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const temporaryHandle = await open(temporary, "w", 0o600);
+  try {
+    await temporaryHandle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await temporaryHandle.sync();
+  } finally {
+    await temporaryHandle.close();
+  }
   await rename(temporary, file);
+
+  const directoryHandle = await open(path.dirname(file), "r");
+  try {
+    await directoryHandle.sync();
+  } finally {
+    await directoryHandle.close();
+  }
 }
 
 export function normalizeConversationUrl(raw: string): string {

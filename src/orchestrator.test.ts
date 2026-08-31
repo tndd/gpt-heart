@@ -8,6 +8,7 @@ import type { BrowserContext } from "playwright";
 import type { Config } from "./config.js";
 import {
   BrowserContextUnavailableError,
+  FairWorkScheduler,
   Orchestrator,
   RoundRobinScheduler,
   roundRobinAfter,
@@ -29,6 +30,35 @@ test("同時実行数1でも全active conversationを巡回する", () => {
   assert.deepEqual(scheduler.pick(active, running, 1), ["b"]);
   assert.deepEqual(scheduler.pick(active, running, 1), ["c"]);
   assert.deepEqual(scheduler.pick(active, running, 1), ["a"]);
+});
+
+test("送信前に失敗し続けるjobがあってもactive conversationへslotを譲る", () => {
+  const scheduler = new FairWorkScheduler();
+  const active = ["a", "b", "c"];
+  const pendingJobs = [
+    {
+      id: "retrying",
+      kind: "create-conversation" as const,
+      parent: "parent",
+      body: "child",
+      sourceHash: "hash",
+      status: "pending" as const,
+    },
+  ];
+  const running = new Set<string>();
+
+  assert.deepEqual(scheduler.pick(active, pendingJobs, running, 1), [
+    { kind: "job", job: pendingJobs[0] },
+  ]);
+  assert.deepEqual(scheduler.pick(active, pendingJobs, running, 1), [
+    { kind: "conversation", url: "a" },
+  ]);
+  assert.deepEqual(scheduler.pick(active, pendingJobs, running, 1), [
+    { kind: "job", job: pendingJobs[0] },
+  ]);
+  assert.deepEqual(scheduler.pick(active, pendingJobs, running, 1), [
+    { kind: "conversation", url: "b" },
+  ]);
 });
 
 test("browser context死亡後はnewPageをretryせず異常終了する", async () => {

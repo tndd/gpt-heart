@@ -31,6 +31,53 @@ export class RoundRobinScheduler {
   }
 }
 
+export type ScheduledWork =
+  | { kind: "job"; job: CreateConversationJob }
+  | { kind: "conversation"; url: string };
+
+export class FairWorkScheduler {
+  #preferConversation = false;
+  readonly #conversationScheduler = new RoundRobinScheduler();
+
+  pick(
+    active: string[],
+    pendingJobs: readonly CreateConversationJob[],
+    running: ReadonlySet<string>,
+    limit: number,
+  ): ScheduledWork[] {
+    const selected: ScheduledWork[] = [];
+    const reserved = new Set(running);
+    let jobIndex = 0;
+
+    const takeJob = (): ScheduledWork | null => {
+      while (jobIndex < pendingJobs.length) {
+        const job = pendingJobs[jobIndex++];
+        if (!job || reserved.has(`job:${job.id}`)) continue;
+        reserved.add(`job:${job.id}`);
+        return { kind: "job", job };
+      }
+      return null;
+    };
+
+    const takeConversation = (): ScheduledWork | null => {
+      const [url] = this.#conversationScheduler.pick(active, reserved, 1);
+      if (!url) return null;
+      reserved.add(url);
+      return { kind: "conversation", url };
+    };
+
+    while (selected.length < limit) {
+      const work = this.#preferConversation
+        ? takeConversation() ?? takeJob()
+        : takeJob() ?? takeConversation();
+      if (!work) break;
+      selected.push(work);
+      this.#preferConversation = work.kind === "job";
+    }
+    return selected;
+  }
+}
+
 export class BrowserContextUnavailableError extends Error {
   constructor(message = "Browser context is unavailable") {
     super(message);
@@ -42,7 +89,7 @@ export class Orchestrator {
   readonly #running = new Set<string>();
   #bootstrapRunning = false;
   #stopping = false;
-  readonly #conversationScheduler = new RoundRobinScheduler();
+  readonly #workScheduler = new FairWorkScheduler();
   #fatalError: BrowserContextUnavailableError | null = null;
 
   constructor(
@@ -72,19 +119,15 @@ export class Orchestrator {
       if (this.#fatalError) throw this.#fatalError;
       const slots = this.config.maxConcurrency - this.#running.size;
       if (slots > 0) {
-        const jobs = this.store.pendingJobs().slice(0, slots);
-        for (const job of jobs) this.#startJob(job);
-      }
-
-      const remainingSlots = this.config.maxConcurrency - this.#running.size;
-      if (remainingSlots > 0) {
-        const candidates = this.#conversationScheduler.pick(
+        const work = this.#workScheduler.pick(
           this.store.activeUrls(),
+          this.store.pendingJobs(),
           this.#running,
-          remainingSlots,
+          slots,
         );
-        for (const url of candidates) {
-          this.#startConversation(url);
+        for (const item of work) {
+          if (item.kind === "job") this.#startJob(item.job);
+          else this.#startConversation(item.url);
         }
       }
 
