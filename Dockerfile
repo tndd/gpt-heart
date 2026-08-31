@@ -18,7 +18,8 @@ COPY src ./src
 RUN npm run build && npm prune --omit=dev
 
 COPY docker/entrypoint.sh /usr/local/bin/raspi-chatgpt-loop
-RUN chmod +x /usr/local/bin/raspi-chatgpt-loop && \
+COPY docker/cleanup-browser-profile.sh /usr/local/bin/cleanup-browser-profile
+RUN chmod +x /usr/local/bin/raspi-chatgpt-loop /usr/local/bin/cleanup-browser-profile && \
     mkdir -p /data/browser /data/state && \
     chown -R node:node /data /app /ms-playwright
 
