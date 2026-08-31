@@ -11,6 +11,10 @@ export interface ConversationProgress {
     text: string;
     sourceHash: string;
   } | null;
+  terminalDecision: {
+    sourceHash: string;
+    jobs: CreateConversationJob[];
+  } | null;
 }
 
 export interface CreateConversationJob {
@@ -19,6 +23,7 @@ export interface CreateConversationJob {
   parent: string | null;
   body: string;
   sourceHash: string;
+  status: "pending" | "send-uncertain";
 }
 
 export interface ControlCommand {
