@@ -108,11 +108,27 @@ export class Orchestrator {
     this.#stopping = true;
   }
 
+  #runtimeFields(): {
+    activeConversations: number;
+    runningWork: number;
+    pendingJobs: number;
+    uncertainJobs: number;
+  } {
+    return {
+      activeConversations: this.store.activeUrls().length,
+      runningWork: this.#running.size + (this.#bootstrapRunning ? 1 : 0),
+      pendingJobs: this.store.pendingJobs().length,
+      uncertainJobs: this.store.uncertainJobs().length,
+    };
+  }
+
   async run(): Promise<void> {
     await this.store.load();
+    log.info("runtime state loaded", this.#runtimeFields());
     if (this.store.uncertainJobs().length > 0) {
       log.error("conversation creation jobs require manual review", {
         count: this.store.uncertainJobs().length,
+        ...this.#runtimeFields(),
       });
     }
     while (!this.#stopping) {
@@ -148,7 +164,11 @@ export class Orchestrator {
     void this.#runConversation(url)
       .catch(async (error: unknown) => {
         if (this.#recordFatalContextError(error)) return;
-        log.error("conversation worker failed; it will retry", { url, error: String(error) });
+        log.error("conversation worker failed; it will retry", {
+          url,
+          error: String(error),
+          ...this.#runtimeFields(),
+        });
         await this.#retryBackoff();
       })
       .finally(() => this.#running.delete(url));
@@ -166,12 +186,14 @@ export class Orchestrator {
           log.error("conversation creation outcome is uncertain; automatic retry is disabled", {
             jobId: job.id,
             error: String(error),
+            ...this.#runtimeFields(),
           });
           return;
         }
         log.error("conversation creation failed before send; it will retry", {
           jobId: job.id,
           error: String(error),
+          ...this.#runtimeFields(),
         });
         await this.#retryBackoff();
       })
@@ -183,7 +205,10 @@ export class Orchestrator {
     void this.#bootstrap()
       .catch(async (error: unknown) => {
         if (this.#recordFatalContextError(error)) return;
-        log.error("bootstrap failed; it will retry", { error: String(error) });
+        log.error("bootstrap failed; it will retry", {
+          error: String(error),
+          ...this.#runtimeFields(),
+        });
         await this.#retryBackoff();
       })
       .finally(() => {
@@ -232,16 +257,19 @@ export class Orchestrator {
     try {
       await driver.goto(this.config.projectUrl);
       await driver.waitForComposer(() =>
-        log.warn("ChatGPT login or verification is required; open the noVNC screen"),
+        log.warn(
+          "ChatGPT composer is still unavailable; open noVNC if login or verification is required",
+          this.#runtimeFields(),
+        ),
       );
       if (this.config.initialBody) {
         await driver.send(this.config.initialBody);
       } else {
-        log.info("waiting for the first message to be sent manually in noVNC");
+        log.info("waiting for the first message to be sent manually in noVNC", this.#runtimeFields());
       }
       const url = normalizeConversationUrl(await driver.waitForConversationUrl(this.config.projectUrl));
       await this.store.setConversation(url, { status: "active", parent: null });
-      log.info("initial conversation registered", { url });
+      log.info("initial conversation registered", { url, ...this.#runtimeFields() });
     } finally {
       await page.close();
     }
@@ -251,14 +279,23 @@ export class Orchestrator {
     const { page, driver } = await this.#newDriver();
     try {
       await driver.goto(this.config.projectUrl);
-      await driver.send(job.body, () =>
-        log.warn("ChatGPT login or verification is required; open the noVNC screen"),
+      await driver.send(
+        job.body,
+        () =>
+          log.warn(
+            "ChatGPT composer is still unavailable; open noVNC if login or verification is required",
+            { jobId: job.id, ...this.#runtimeFields() },
+          ),
         async () => this.store.markJobSendUncertain(job.id),
       );
       const url = normalizeConversationUrl(await driver.waitForConversationUrl(this.config.projectUrl));
       await this.store.setConversation(url, { status: "active", parent: job.parent });
       await this.store.removeJob(job.id);
-      log.info("child conversation created", { url, parent: job.parent });
+      log.info("child conversation created", {
+        url,
+        parent: job.parent,
+        ...this.#runtimeFields(),
+      });
     } finally {
       await page.close();
     }
@@ -275,18 +312,19 @@ export class Orchestrator {
     try {
       await driver.goto(url);
       await driver.waitForComposer(() =>
-        log.warn("ChatGPT login or verification is required; open the noVNC screen", { url }),
+        log.warn(
+          "ChatGPT composer is still unavailable; open noVNC if login or verification is required",
+          { url, ...this.#runtimeFields() },
+        ),
       );
 
       if (!this.#stopping && this.store.getState(url)?.status === "active") {
-        const role = await driver.lastMessageRole();
+        const role = await driver.waitForMessageRole();
         const assistantCount = await driver.assistantCount();
         if (role === "user") {
           await driver.waitForGenerationComplete(assistantCount + 1);
-        } else if (role === "assistant") {
-          await driver.waitForGenerationComplete(Math.max(assistantCount, 1));
         } else {
-          throw new Error("Conversation has no recognizable messages");
+          await driver.waitForGenerationComplete(Math.max(assistantCount, 1));
         }
 
         const progress = this.store.getProgress(url);
@@ -299,7 +337,7 @@ export class Orchestrator {
               pendingSend: null,
               terminalDecision: null,
             });
-            log.info("recovered pending send", { url });
+            log.info("recovered pending send", { url, ...this.#runtimeFields() });
             return;
           } else {
             await this.store.setProgress(url, { ...progress, pendingSend: null });
@@ -319,7 +357,7 @@ export class Orchestrator {
           await page.waitForTimeout(this.config.actionDelayMs);
           await driver.send(".");
           await this.store.setProgress(url, { ...recovered, pendingSend: null });
-          log.info("recovered missing dot", { url });
+          log.info("recovered missing dot", { url, ...this.#runtimeFields() });
           return;
         }
 
@@ -328,6 +366,7 @@ export class Orchestrator {
           log.warn("ignored malformed trailing control lines", {
             url,
             count: decision.invalidLines.length,
+            ...this.#runtimeFields(),
           });
         }
 
@@ -347,7 +386,11 @@ export class Orchestrator {
           };
           await this.store.setProgress(url, terminalProgress);
           await this.store.finalizeTerminalDecision(url);
-          log.info("conversation ended by control signal", { url, children: jobs.length });
+          log.info("conversation ended by control signal", {
+            url,
+            children: jobs.length,
+            ...this.#runtimeFields(),
+          });
           return;
         }
 
@@ -360,7 +403,7 @@ export class Orchestrator {
         await page.waitForTimeout(this.config.actionDelayMs);
         await driver.send(".");
         await this.store.setProgress(url, { ...staged, pendingSend: null });
-        log.info("dot sent", { url });
+        log.info("dot sent", { url, ...this.#runtimeFields() });
       }
     } finally {
       await page.close();

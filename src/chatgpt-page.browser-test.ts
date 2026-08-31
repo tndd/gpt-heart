@@ -82,3 +82,69 @@ test("送信直前callbackが失敗した場合はbuttonをclickしない", asyn
     await browser.close();
   }
 });
+
+test("短いcomposer描画遅延ではwarning callbackを呼ばない", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div id="root"></div>
+      <script>
+        setTimeout(() => {
+          document.querySelector('#root').insertAdjacentHTML(
+            'beforeend',
+            '<div id="prompt-textarea" contenteditable="true"></div>'
+          );
+        }, 75);
+      </script>
+    `);
+    let warnings = 0;
+    const driver = new ChatGptPage(page, 25, 500);
+    await driver.waitForComposer(() => {
+      warnings += 1;
+    }, 250);
+    assert.equal(warnings, 0);
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("composerより遅れてmessage DOMが表示されてもroleを待つ", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div id="messages"></div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <script>
+        setTimeout(() => {
+          document.querySelector('#messages').insertAdjacentHTML(
+            'beforeend',
+            '<div data-message-author-role="assistant">準備完了</div>'
+          );
+        }, 100);
+      </script>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    const startedAt = Date.now();
+    assert.equal(await driver.waitForMessageRole(500), "assistant");
+    assert.ok(Date.now() - startedAt >= 75);
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("message DOMが表示されない場合はtimeoutする", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<div id="prompt-textarea" contenteditable="true"></div>');
+    const driver = new ChatGptPage(page, 25, 500);
+    await assert.rejects(driver.waitForMessageRole(125), /messages to become ready/);
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
