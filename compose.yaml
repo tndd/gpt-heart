@@ -1,0 +1,15 @@
+services:
+  loop:
+    build: .
+    init: true
+    restart: unless-stopped
+    ipc: host
+    env_file:
+      - .env
+    environment:
+      BROWSER_PROFILE_DIR: /data/browser
+      STATE_DIR: /data/state
+    volumes:
+      - ./data:/data
+    ports:
+      - "${NOVNC_BIND:-127.0.0.1}:6080:6080"
