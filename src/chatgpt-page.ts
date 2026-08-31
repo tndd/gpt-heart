@@ -15,8 +15,6 @@ const SEND_SELECTORS = [
 ];
 const STOP_SELECTORS = [
   '[data-testid="stop-button"]',
-  'button[aria-label*="Stop"]',
-  'button[aria-label*="停止"]',
 ];
 const MESSAGE_SELECTOR = '[data-message-author-role="user"], [data-message-author-role="assistant"]';
 const ASSISTANT_SELECTOR = '[data-message-author-role="assistant"]';
@@ -61,13 +59,18 @@ export class ChatGptPage {
     }
   }
 
-  async send(text: string, onWaiting?: () => void): Promise<void> {
+  async send(
+    text: string,
+    onWaiting?: () => void,
+    onBeforeClick?: () => Promise<void>,
+  ): Promise<void> {
     const composer = await this.waitForComposer(onWaiting);
     await composer.fill(text);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
       const button = await firstVisible(this.page, SEND_SELECTORS);
       if (button && (await button.isEnabled().catch(() => false))) {
+        await onBeforeClick?.();
         await button.click();
         return;
       }
@@ -125,15 +128,31 @@ export class ChatGptPage {
   }
 
   async waitForConversationUrl(projectUrl: string): Promise<string> {
-    const project = new URL(projectUrl);
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
-      const current = new URL(this.page.url());
-      if (current.origin === project.origin && /\/c\/[^/]+/.test(current.pathname)) {
-        return current.toString();
+      const current = this.page.url();
+      if (isProjectConversationUrl(projectUrl, current)) {
+        return current;
       }
       await this.page.waitForTimeout(250);
     }
     throw new Error("ChatGPT did not navigate to a conversation URL after sending");
   }
+}
+
+export function isProjectConversationUrl(projectUrl: string, candidateUrl: string): boolean {
+  const project = new URL(projectUrl);
+  const candidate = new URL(candidateUrl);
+  if (candidate.origin !== project.origin) return false;
+
+  const projectParts = project.pathname.split("/").filter(Boolean);
+  const candidateParts = candidate.pathname.split("/").filter(Boolean);
+  if (projectParts.at(-1) !== "project") return false;
+
+  const expectedPrefix = [...projectParts.slice(0, -1), "c"];
+  return (
+    candidateParts.length === expectedPrefix.length + 1 &&
+    expectedPrefix.every((part, index) => candidateParts[index] === part) &&
+    (candidateParts.at(-1)?.length ?? 0) > 0
+  );
 }

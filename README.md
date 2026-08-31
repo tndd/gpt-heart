@@ -108,7 +108,9 @@ assistant responseの末尾に連続して存在する `@@RASPI@@` 行だけを�
 }
 ```
 
-重複送信を抑える処理位置は `progress.json`、未作成の `next` は `queue.json` に分離します。どのファイルも一時ファイルからatomic renameして更新します。
+重複送信を抑える処理位置と終端決定は `progress.json`、未作成の `next` は `queue.json` に分離します。どのファイルも一時ファイルからatomic renameして更新します。
+
+child conversationの送信ボタンを押す直前にjobを `send-uncertain` へ変更します。この状態のjobは、送信結果を確認できなくても同じbodyを自動再送しません。`queue.json` とChatGPT Projectを確認し、必要な場合だけ人手で整理してください。
 
 ## 停止と再開
 
@@ -135,5 +137,5 @@ docker build -t raspi-chatgpt-loop:test .
 ## 既知の限界
 
 - ChatGPT UIの変更時は `src/chatgpt-page.ts` の候補セレクタ更新が必要です。
-- プロセスが「新規conversationへの初回送信後、URL保存前」という短い区間で強制終了すると、再試行で子conversationが重複する可能性があります。公開APIを使わずUIだけで操作する制約上、完全なexactly-once保証はできません。
+- 新規conversationへの初回送信結果が不明になったjobは安全側で停止するため、人手での確認が必要です。UI操作だけで完全なexactly-once判定はできません。
 - CAPTCHA、追加認証、利用上限画面は自動突破せず、noVNCでの手動対応を待ちます。

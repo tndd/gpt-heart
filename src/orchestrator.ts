@@ -11,16 +11,51 @@ function jobId(parent: string, sourceHash: string, index: number): string {
   return createHash("sha256").update(`${parent}\n${sourceHash}\n${index}`).digest("hex");
 }
 
+export function roundRobinAfter(items: string[], previous: string | null): string[] {
+  if (items.length < 2 || previous === null) return [...items];
+  const index = items.indexOf(previous);
+  if (index < 0) return [...items];
+  return [...items.slice(index + 1), ...items.slice(0, index + 1)];
+}
+
+export class RoundRobinScheduler {
+  #previous: string | null = null;
+
+  pick(active: string[], running: ReadonlySet<string>, limit: number): string[] {
+    if (limit <= 0) return [];
+    const selected = roundRobinAfter(active, this.#previous)
+      .filter((url) => !running.has(url))
+      .slice(0, limit);
+    for (const url of selected) this.#previous = url;
+    return selected;
+  }
+}
+
+export class BrowserContextUnavailableError extends Error {
+  constructor(message = "Browser context is unavailable") {
+    super(message);
+    this.name = "BrowserContextUnavailableError";
+  }
+}
+
 export class Orchestrator {
   readonly #running = new Set<string>();
   #bootstrapRunning = false;
   #stopping = false;
+  readonly #conversationScheduler = new RoundRobinScheduler();
+  #fatalError: BrowserContextUnavailableError | null = null;
 
   constructor(
     private readonly context: BrowserContext,
     private readonly store: StateStore,
     private readonly config: Config,
-  ) {}
+  ) {
+    this.context.once("close", () => {
+      if (!this.#stopping) {
+        this.#fatalError = new BrowserContextUnavailableError("Browser context closed unexpectedly");
+      }
+    });
+  }
 
   stop(): void {
     this.#stopping = true;
@@ -28,20 +63,29 @@ export class Orchestrator {
 
   async run(): Promise<void> {
     await this.store.load();
+    if (this.store.uncertainJobs().length > 0) {
+      log.error("conversation creation jobs require manual review", {
+        count: this.store.uncertainJobs().length,
+      });
+    }
     while (!this.#stopping) {
+      if (this.#fatalError) throw this.#fatalError;
       const slots = this.config.maxConcurrency - this.#running.size;
       if (slots > 0) {
-        const jobs = this.store.jobs().slice(0, slots);
+        const jobs = this.store.pendingJobs().slice(0, slots);
         for (const job of jobs) this.#startJob(job);
       }
 
       const remainingSlots = this.config.maxConcurrency - this.#running.size;
       if (remainingSlots > 0) {
-        const candidates = this.store
-          .activeUrls()
-          .filter((url) => !this.#running.has(url))
-          .slice(0, remainingSlots);
-        for (const url of candidates) this.#startConversation(url);
+        const candidates = this.#conversationScheduler.pick(
+          this.store.activeUrls(),
+          this.#running,
+          remainingSlots,
+        );
+        for (const url of candidates) {
+          this.#startConversation(url);
+        }
       }
 
       if (
@@ -60,6 +104,7 @@ export class Orchestrator {
     this.#running.add(url);
     void this.#runConversation(url)
       .catch(async (error: unknown) => {
+        if (this.#recordFatalContextError(error)) return;
         log.error("conversation worker failed; it will retry", { url, error: String(error) });
         await this.#retryBackoff();
       })
@@ -72,7 +117,19 @@ export class Orchestrator {
     this.#running.add(key);
     void this.#createConversation(job)
       .catch(async (error: unknown) => {
-        log.error("conversation creation failed; it will retry", { jobId: job.id, error: String(error) });
+        if (this.#recordFatalContextError(error)) return;
+        const current = this.store.getJob(job.id);
+        if (current?.status === "send-uncertain") {
+          log.error("conversation creation outcome is uncertain; automatic retry is disabled", {
+            jobId: job.id,
+            error: String(error),
+          });
+          return;
+        }
+        log.error("conversation creation failed before send; it will retry", {
+          jobId: job.id,
+          error: String(error),
+        });
         await this.#retryBackoff();
       })
       .finally(() => this.#running.delete(key));
@@ -82,6 +139,7 @@ export class Orchestrator {
     this.#bootstrapRunning = true;
     void this.#bootstrap()
       .catch(async (error: unknown) => {
+        if (this.#recordFatalContextError(error)) return;
         log.error("bootstrap failed; it will retry", { error: String(error) });
         await this.#retryBackoff();
       })
@@ -96,8 +154,30 @@ export class Orchestrator {
     );
   }
 
+  #recordFatalContextError(error: unknown): boolean {
+    const message = String(error);
+    if (
+      error instanceof BrowserContextUnavailableError ||
+      /target page, context or browser has been closed|browser context closed/i.test(message)
+    ) {
+      this.#fatalError =
+        error instanceof BrowserContextUnavailableError
+          ? error
+          : new BrowserContextUnavailableError(message);
+      return true;
+    }
+    return false;
+  }
+
   async #newDriver(): Promise<{ page: Page; driver: ChatGptPage }> {
-    const page = await this.context.newPage();
+    if (this.#fatalError) throw this.#fatalError;
+    let page: Page;
+    try {
+      page = await this.context.newPage();
+    } catch (error) {
+      if (this.#recordFatalContextError(error)) throw this.#fatalError;
+      throw error;
+    }
     return {
       page,
       driver: new ChatGptPage(page, this.config.pollIntervalMs, this.config.completionTimeoutMs),
@@ -130,6 +210,7 @@ export class Orchestrator {
       await driver.goto(this.config.projectUrl);
       await driver.send(job.body, () =>
         log.warn("ChatGPT login or verification is required; open the noVNC screen"),
+        async () => this.store.markJobSendUncertain(job.id),
       );
       const url = normalizeConversationUrl(await driver.waitForConversationUrl(this.config.projectUrl));
       await this.store.setConversation(url, { status: "active", parent: job.parent });
@@ -141,6 +222,12 @@ export class Orchestrator {
   }
 
   async #runConversation(url: string): Promise<void> {
+    const initialProgress = this.store.getProgress(url);
+    if (initialProgress.terminalDecision) {
+      await this.store.finalizeTerminalDecision(url);
+      return;
+    }
+
     const { page, driver } = await this.#newDriver();
     try {
       await driver.goto(url);
@@ -148,7 +235,7 @@ export class Orchestrator {
         log.warn("ChatGPT login or verification is required; open the noVNC screen", { url }),
       );
 
-      while (!this.#stopping && this.store.getState(url)?.status === "active") {
+      if (!this.#stopping && this.store.getState(url)?.status === "active") {
         const role = await driver.lastMessageRole();
         const assistantCount = await driver.assistantCount();
         if (role === "user") {
@@ -164,9 +251,13 @@ export class Orchestrator {
         if (progress.pendingSend) {
           if (role === "assistant" && latest?.hash === progress.pendingSend.sourceHash) {
             await driver.send(progress.pendingSend.text);
-            await this.store.setProgress(url, { ...progress, pendingSend: null });
+            await this.store.setProgress(url, {
+              ...progress,
+              pendingSend: null,
+              terminalDecision: null,
+            });
             log.info("recovered pending send", { url });
-            continue;
+            return;
           } else {
             await this.store.setProgress(url, { ...progress, pendingSend: null });
           }
@@ -179,13 +270,14 @@ export class Orchestrator {
           const recovered = {
             lastProcessedAssistantHash: assistant.hash,
             pendingSend: { text: ".", sourceHash: assistant.hash },
+            terminalDecision: null,
           };
           await this.store.setProgress(url, recovered);
           await page.waitForTimeout(this.config.actionDelayMs);
           await driver.send(".");
           await this.store.setProgress(url, { ...recovered, pendingSend: null });
           log.info("recovered missing dot", { url });
-          continue;
+          return;
         }
 
         const decision = decideResponse(assistant.text);
@@ -203,13 +295,15 @@ export class Orchestrator {
             parent: url,
             body,
             sourceHash: assistant.hash,
+            status: "pending" as const,
           }));
-          await this.store.enqueue(jobs);
-          await this.store.setProgress(url, {
+          const terminalProgress = {
             lastProcessedAssistantHash: assistant.hash,
             pendingSend: null,
-          });
-          await this.store.endConversation(url);
+            terminalDecision: { sourceHash: assistant.hash, jobs },
+          };
+          await this.store.setProgress(url, terminalProgress);
+          await this.store.finalizeTerminalDecision(url);
           log.info("conversation ended by control signal", { url, children: jobs.length });
           return;
         }
@@ -217,6 +311,7 @@ export class Orchestrator {
         const staged = {
           lastProcessedAssistantHash: assistant.hash,
           pendingSend: { text: ".", sourceHash: assistant.hash },
+          terminalDecision: null,
         };
         await this.store.setProgress(url, staged);
         await page.waitForTimeout(this.config.actionDelayMs);
