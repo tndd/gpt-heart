@@ -16,6 +16,29 @@ const SEND_SELECTORS = [
 const STOP_SELECTORS = [
   '[data-testid="stop-button"]',
 ];
+const UNARCHIVE_SELECTORS = [
+  'button[aria-label*="Unarchive"]',
+  'button[aria-label*="アーカイブ解除"]',
+  'button[aria-label*="アーカイブを解除"]',
+  'button:has-text("Unarchive")',
+  'button:has-text("アーカイブ解除")',
+  'button:has-text("アーカイブを解除")',
+  '[role="button"]:has-text("Unarchive")',
+  '[role="button"]:has-text("アーカイブ解除")',
+  '[role="button"]:has-text("アーカイブを解除")',
+];
+const UNAVAILABLE_TEXTS = [
+  "Conversation not found",
+  "Unable to load conversation",
+  "This conversation has been deleted",
+  "Conversation deleted",
+  "Could not load this ChatGPT conversation",
+  "会話が見つかりません",
+  "会話を読み込めません",
+  "会話を読み込めませんでした",
+  "この会話は削除されました",
+  "会話が削除されました",
+];
 const MESSAGE_SELECTOR = '[data-message-author-role="user"], [data-message-author-role="assistant"]';
 const ASSISTANT_SELECTOR = '[data-message-author-role="assistant"]';
 
@@ -31,7 +54,22 @@ async function firstVisible(page: Page, selectors: string[]): Promise<Locator | 
   return null;
 }
 
+async function firstExactVisibleText(page: Page, texts: string[]): Promise<Locator | null> {
+  for (const text of texts) {
+    const locator = page.getByText(text, { exact: true }).last();
+    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) return locator;
+  }
+  return null;
+}
+
+export type ConversationReadyState =
+  | { kind: "composer"; composer: Locator }
+  | { kind: "archived" }
+  | { kind: "unavailable" };
+
 export class ChatGptPage {
+  #lastRequestedUrl: string | null = null;
+
   constructor(
     private readonly page: Page,
     private readonly pollIntervalMs: number,
@@ -43,21 +81,45 @@ export class ChatGptPage {
   }
 
   async goto(url: string): Promise<void> {
+    this.#lastRequestedUrl = url;
     await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
   }
 
-  async waitForComposer(onWaiting?: () => void, warningDelayMs = 5_000): Promise<Locator> {
+  async waitForConversationReady(
+    onWaiting?: () => void,
+    warningDelayMs = 5_000,
+  ): Promise<ConversationReadyState> {
     const warningAt = Date.now() + warningDelayMs;
     let announced = false;
     for (;;) {
+      if (await firstVisible(this.page, UNARCHIVE_SELECTORS)) return { kind: "archived" };
+      if (
+        this.#lastRequestedUrl &&
+        isSameProjectLandingUrl(this.#lastRequestedUrl, this.page.url())
+      ) {
+        return { kind: "unavailable" };
+      }
       const composer = await firstVisible(this.page, COMPOSER_SELECTORS);
-      if (composer) return composer;
+      if (composer) return { kind: "composer", composer };
+      const messageCount = await this.page.locator(MESSAGE_SELECTOR).count();
+      if (
+        messageCount === 0 &&
+        (await firstExactVisibleText(this.page, UNAVAILABLE_TEXTS))
+      ) {
+        return { kind: "unavailable" };
+      }
       if (!announced && Date.now() >= warningAt) {
         onWaiting?.();
         announced = true;
       }
       await this.page.waitForTimeout(this.pollIntervalMs);
     }
+  }
+
+  async waitForComposer(onWaiting?: () => void, warningDelayMs = 5_000): Promise<Locator> {
+    const ready = await this.waitForConversationReady(onWaiting, warningDelayMs);
+    if (ready.kind !== "composer") throw new Error(`ChatGPT conversation is ${ready.kind}`);
+    return ready.composer;
   }
 
   async send(
@@ -154,6 +216,29 @@ export class ChatGptPage {
 function projectIdFromSegment(segment: string | undefined): string | null {
   const match = /^g-p-([0-9a-f]{32})(?:-|$)/i.exec(segment ?? "");
   return match?.[1]?.toLowerCase() ?? null;
+}
+
+export function isSameProjectLandingUrl(conversationUrl: string, currentUrl: string): boolean {
+  const conversation = new URL(conversationUrl);
+  const current = new URL(currentUrl);
+  if (current.origin !== conversation.origin) return false;
+
+  const conversationParts = conversation.pathname.split("/").filter(Boolean);
+  const currentParts = current.pathname.split("/").filter(Boolean);
+  if (
+    conversationParts.length !== 4 ||
+    conversationParts[0] !== "g" ||
+    conversationParts[2] !== "c" ||
+    currentParts.length !== 3 ||
+    currentParts[0] !== "g" ||
+    currentParts[2] !== "project"
+  ) {
+    return false;
+  }
+
+  const conversationProjectId = projectIdFromSegment(conversationParts[1]);
+  const currentProjectId = projectIdFromSegment(currentParts[1]);
+  return conversationProjectId !== null && currentProjectId === conversationProjectId;
 }
 
 export function isProjectConversationUrl(projectUrl: string, candidateUrl: string): boolean {

@@ -11,6 +11,19 @@ function jobId(parent: string, sourceHash: string, index: number): string {
   return createHash("sha256").update(`${parent}\n${sourceHash}\n${index}`).digest("hex");
 }
 
+export function archivedRecoveryJob(url: string): CreateConversationJob {
+  const parent = normalizeConversationUrl(url);
+  const sourceHash = createHash("sha256").update(`archived\n${parent}`).digest("hex");
+  return {
+    id: jobId(parent, sourceHash, 0),
+    kind: "create-conversation",
+    parent,
+    body: ".",
+    sourceHash,
+    status: "pending",
+  };
+}
+
 export function roundRobinAfter(items: string[], previous: string | null): string[] {
   if (items.length < 2 || previous === null) return [...items];
   const index = items.indexOf(previous);
@@ -311,7 +324,7 @@ export class Orchestrator {
     const { page, driver } = await this.#newDriver();
     try {
       await driver.goto(url);
-      await driver.waitForComposer(() =>
+      const ready = await driver.waitForConversationReady(() =>
         log.warn(
           "ChatGPT composer is still unavailable; open noVNC if login or verification is required",
           { url, ...this.#runtimeFields() },
@@ -319,6 +332,23 @@ export class Orchestrator {
       );
 
       if (!this.#stopping && this.store.getState(url)?.status === "active") {
+        if (ready.kind !== "composer") {
+          const progress = this.store.getProgress(url);
+          const job = archivedRecoveryJob(url);
+          await this.store.setProgress(url, {
+            lastProcessedAssistantHash: progress.lastProcessedAssistantHash,
+            pendingSend: null,
+            terminalDecision: { sourceHash: job.sourceHash, jobs: [job] },
+          });
+          await this.store.finalizeTerminalDecision(url);
+          log.info(`${ready.kind} conversation replaced with successor`, {
+            url,
+            jobId: job.id,
+            ...this.#runtimeFields(),
+          });
+          return;
+        }
+
         const role = await driver.waitForMessageRole();
         const assistantCount = await driver.assistantCount();
         if (role === "user") {

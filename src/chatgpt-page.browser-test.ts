@@ -148,3 +148,88 @@ test("message DOMが表示されない場合はtimeoutする", async () => {
     await browser.close();
   }
 });
+
+test("Unarchive UIがあるconversationをarchivedとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div data-message-author-role="assistant">過去の応答</div>
+      <button>Unarchive to continue</button>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "archived" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("日本語のアーカイブ解除UIもarchivedとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<button aria-label="アーカイブを解除">アーカイブ解除</button>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "archived" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("Conversation not foundをunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>Conversation not found</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("Unable to load conversationもunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>Unable to load conversation</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("This conversation has been deletedもunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>This conversation has been deleted</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("削除エラー文言が会話内にあってもcomposerがあれば通常conversationを優先する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div data-message-author-role="assistant">Conversation not found</div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    const ready = await driver.waitForConversationReady(undefined, 250);
+    assert.equal(ready.kind, "composer");
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
