@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isProjectConversationUrl } from "./chatgpt-page.js";
+import { isProjectConversationUrl, isSameProjectLandingUrl } from "./chatgpt-page.js";
 
 const projectId = "6a94c14fffb48191a369bb25418da7f7";
 const otherProjectId = "7b94c14fffb48191a369bb25418da7f7";
@@ -58,6 +58,28 @@ test("同一Project IDならslug差分を許容する", () => {
       slugProject,
       `https://chatgpt.com/g/g-p-${otherProjectId}-think/c/conversation-id`,
     ),
+    false,
+  );
+});
+
+test("conversationから同一Project rootへ戻された場合だけ退避と判定する", () => {
+  const conversation = `https://chatgpt.com/g/g-p-${projectId}-think/c/conversation-id`;
+
+  assert.equal(
+    isSameProjectLandingUrl(conversation, `https://chatgpt.com/g/g-p-${projectId}/project`),
+    true,
+  );
+  assert.equal(
+    isSameProjectLandingUrl(
+      conversation,
+      `https://chatgpt.com/g/g-p-${projectId}-renamed/project`,
+    ),
+    true,
+  );
+  assert.equal(isSameProjectLandingUrl(conversation, "https://chatgpt.com/auth/login"), false);
+  assert.equal(isSameProjectLandingUrl(conversation, conversation), false);
+  assert.equal(
+    isSameProjectLandingUrl(conversation, `https://chatgpt.com/g/g-p-${otherProjectId}/project`),
     false,
   );
 });

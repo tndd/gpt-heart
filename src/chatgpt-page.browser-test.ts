@@ -83,6 +83,63 @@ test("送信直前callbackが失敗した場合はbuttonをclickしない", asyn
   }
 });
 
+test("送信したuserメッセージがDOMに現れるまで成功扱いにしない", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div id="messages"></div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button">Send</button>
+      <script>
+        document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+          const text = document.querySelector('#prompt-textarea').textContent;
+          setTimeout(() => {
+            document.querySelector('#messages').insertAdjacentHTML(
+              'beforeend',
+              '<div data-message-author-role="user">' + text + '</div>'
+            );
+          }, 250);
+        });
+      </script>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    const startedAt = Date.now();
+    await driver.send(".");
+    assert.ok(Date.now() - startedAt >= 200);
+    assert.equal(await driver.userCount(), 1);
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("userメッセージ属性がなくても生成開始を送信成功として確認する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div id="prompt-textarea" contenteditable="true"></div>
+      <button data-testid="send-button">Send</button>
+      <script>
+        document.querySelector('[data-testid="send-button"]').addEventListener('click', () => {
+          setTimeout(() => {
+            document.querySelector('[data-testid="send-button"]').insertAdjacentHTML(
+              'afterend',
+              '<button data-testid="stop-button">Stop</button>'
+            );
+          }, 100);
+        });
+      </script>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    await driver.send(".");
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
 test("短いcomposer描画遅延ではwarning callbackを呼ばない", async () => {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage();
@@ -143,6 +200,115 @@ test("message DOMが表示されない場合はtimeoutする", async () => {
     await page.setContent('<div id="prompt-textarea" contenteditable="true"></div>');
     const driver = new ChatGptPage(page, 25, 500);
     await assert.rejects(driver.waitForMessageRole(125), /messages to become ready/);
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("Unarchive UIがあるconversationをarchivedとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div data-message-author-role="assistant">過去の応答</div>
+      <button>Unarchive to continue</button>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "archived" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("日本語のアーカイブ解除UIもarchivedとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<button aria-label="アーカイブを解除">アーカイブ解除</button>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "archived" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("disabled composerを通常conversationと誤認せず後から出るarchive UIを待つ", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <textarea id="prompt-textarea" disabled></textarea>
+      <div id="status"></div>
+      <script>
+        setTimeout(() => {
+          document.querySelector('#status').insertAdjacentHTML(
+            'beforeend',
+            '<button>アーカイブを解除する</button>'
+          );
+        }, 100);
+      </script>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "archived" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("Conversation not foundをunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>Conversation not found</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("Unable to load conversationもunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>Unable to load conversation</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("This conversation has been deletedもunavailableとして検出する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent('<main><div>This conversation has been deleted</div></main>');
+    const driver = new ChatGptPage(page, 25, 500);
+    assert.deepEqual(await driver.waitForConversationReady(undefined, 250), { kind: "unavailable" });
+  } finally {
+    await page.close();
+    await browser.close();
+  }
+});
+
+test("削除エラー文言が会話内にあってもcomposerがあれば通常conversationを優先する", async () => {
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(`
+      <div data-message-author-role="assistant">Conversation not found</div>
+      <div id="prompt-textarea" contenteditable="true"></div>
+    `);
+    const driver = new ChatGptPage(page, 25, 500);
+    const ready = await driver.waitForConversationReady(undefined, 250);
+    assert.equal(ready.kind, "composer");
   } finally {
     await page.close();
     await browser.close();

@@ -11,11 +11,32 @@ function jobId(parent: string, sourceHash: string, index: number): string {
   return createHash("sha256").update(`${parent}\n${sourceHash}\n${index}`).digest("hex");
 }
 
+export function archivedRecoveryJob(url: string): CreateConversationJob {
+  const parent = normalizeConversationUrl(url);
+  const sourceHash = createHash("sha256").update(`archived\n${parent}`).digest("hex");
+  return {
+    id: jobId(parent, sourceHash, 0),
+    kind: "create-conversation",
+    parent,
+    body: ".",
+    sourceHash,
+    status: "pending",
+  };
+}
+
 export function roundRobinAfter(items: string[], previous: string | null): string[] {
   if (items.length < 2 || previous === null) return [...items];
   const index = items.indexOf(previous);
   if (index < 0) return [...items];
   return [...items.slice(index + 1), ...items.slice(0, index + 1)];
+}
+
+export function isSameConversationUrl(first: string, second: string): boolean {
+  try {
+    return normalizeConversationUrl(first) === normalizeConversationUrl(second);
+  } catch {
+    return false;
+  }
 }
 
 export class RoundRobinScheduler {
@@ -85,11 +106,40 @@ export class BrowserContextUnavailableError extends Error {
   }
 }
 
+export class ConversationPageRegistry {
+  readonly #pages = new Map<string, Page>();
+
+  get(url: string): Page | undefined {
+    const key = normalizeConversationUrl(url);
+    const page = this.#pages.get(key);
+    if (page?.isClosed()) {
+      this.#pages.delete(key);
+      return undefined;
+    }
+    return page;
+  }
+
+  async retain(url: string, page: Page): Promise<void> {
+    const key = normalizeConversationUrl(url);
+    const previous = this.#pages.get(key);
+    this.#pages.set(key, page);
+    if (previous && previous !== page && !previous.isClosed()) await previous.close();
+  }
+
+  async release(url: string): Promise<void> {
+    const key = normalizeConversationUrl(url);
+    const page = this.#pages.get(key);
+    this.#pages.delete(key);
+    if (page && !page.isClosed()) await page.close();
+  }
+}
+
 export class Orchestrator {
   readonly #running = new Set<string>();
   #bootstrapRunning = false;
   #stopping = false;
   readonly #workScheduler = new FairWorkScheduler();
+  readonly #conversationPages = new ConversationPageRegistry();
   #fatalError: BrowserContextUnavailableError | null = null;
 
   constructor(
@@ -252,8 +302,26 @@ export class Orchestrator {
     };
   }
 
+  async #conversationDriver(url: string): Promise<{ page: Page; driver: ChatGptPage }> {
+    const existing = this.#conversationPages.get(url);
+    if (existing) {
+      return {
+        page: existing,
+        driver: new ChatGptPage(
+          existing,
+          this.config.pollIntervalMs,
+          this.config.completionTimeoutMs,
+        ),
+      };
+    }
+    const created = await this.#newDriver();
+    await this.#conversationPages.retain(url, created.page);
+    return created;
+  }
+
   async #bootstrap(): Promise<void> {
     const { page, driver } = await this.#newDriver();
+    let retained = false;
     try {
       await driver.goto(this.config.projectUrl);
       await driver.waitForComposer(() =>
@@ -269,14 +337,17 @@ export class Orchestrator {
       }
       const url = normalizeConversationUrl(await driver.waitForConversationUrl(this.config.projectUrl));
       await this.store.setConversation(url, { status: "active", parent: null });
+      await this.#conversationPages.retain(url, page);
+      retained = true;
       log.info("initial conversation registered", { url, ...this.#runtimeFields() });
     } finally {
-      await page.close();
+      if (!retained) await page.close();
     }
   }
 
   async #createConversation(job: CreateConversationJob): Promise<void> {
     const { page, driver } = await this.#newDriver();
+    let retained = false;
     try {
       await driver.goto(this.config.projectUrl);
       await driver.send(
@@ -291,13 +362,15 @@ export class Orchestrator {
       const url = normalizeConversationUrl(await driver.waitForConversationUrl(this.config.projectUrl));
       await this.store.setConversation(url, { status: "active", parent: job.parent });
       await this.store.removeJob(job.id);
+      await this.#conversationPages.retain(url, page);
+      retained = true;
       log.info("child conversation created", {
         url,
         parent: job.parent,
         ...this.#runtimeFields(),
       });
     } finally {
-      await page.close();
+      if (!retained) await page.close();
     }
   }
 
@@ -305,13 +378,14 @@ export class Orchestrator {
     const initialProgress = this.store.getProgress(url);
     if (initialProgress.terminalDecision) {
       await this.store.finalizeTerminalDecision(url);
+      await this.#conversationPages.release(url);
       return;
     }
 
-    const { page, driver } = await this.#newDriver();
+    const { page, driver } = await this.#conversationDriver(url);
     try {
-      await driver.goto(url);
-      await driver.waitForComposer(() =>
+      if (!isSameConversationUrl(driver.url(), url)) await driver.goto(url);
+      const ready = await driver.waitForConversationReady(() =>
         log.warn(
           "ChatGPT composer is still unavailable; open noVNC if login or verification is required",
           { url, ...this.#runtimeFields() },
@@ -319,6 +393,23 @@ export class Orchestrator {
       );
 
       if (!this.#stopping && this.store.getState(url)?.status === "active") {
+        if (ready.kind !== "composer") {
+          const progress = this.store.getProgress(url);
+          const job = archivedRecoveryJob(url);
+          await this.store.setProgress(url, {
+            lastProcessedAssistantHash: progress.lastProcessedAssistantHash,
+            pendingSend: null,
+            terminalDecision: { sourceHash: job.sourceHash, jobs: [job] },
+          });
+          await this.store.finalizeTerminalDecision(url);
+          log.info(`${ready.kind} conversation replaced with successor`, {
+            url,
+            jobId: job.id,
+            ...this.#runtimeFields(),
+          });
+          return;
+        }
+
         const role = await driver.waitForMessageRole();
         const assistantCount = await driver.assistantCount();
         if (role === "user") {
@@ -406,7 +497,9 @@ export class Orchestrator {
         log.info("dot sent", { url, ...this.#runtimeFields() });
       }
     } finally {
-      await page.close();
+      if (this.store.getState(url)?.status !== "active") {
+        await this.#conversationPages.release(url);
+      }
     }
   }
 }
