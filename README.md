@@ -23,9 +23,10 @@ Raspberry Pi上のDockerからWeb版ChatGPTを操作し、指定Project内のcon
 
 ```bash
 cp .env.example .env
-docker compose up -d --build
-docker compose logs -f loop
+./start
 ```
+
+`./start` はbuild・バックグラウンド起動・`loop` のログ追尾まで行います。`Ctrl+C` で終了するのはログ追尾だけで、containerはそのまま動作します。
 
 別PCからRaspberry PiへSSHトンネルを作ります。
 
@@ -61,8 +62,7 @@ LOGIN_ONLY=false
 ```
 
 ```bash
-docker compose up -d
-docker compose logs -f loop
+./start
 ```
 
 ログイン専用モードではPlaywrightワーカーを起動せず、通常のheaded Chromiumだけを起動します。ログイン後のCookieなどは `data/browser` に残り、通常運転時のPlaywrightが同じprofileを使用します。GoogleのパスワードやCookieを `.env`、ソースコード、Gitへ保存しないでください。また、Chromiumからパスワード保存を提案されても保存しないことを推奨します。
