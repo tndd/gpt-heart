@@ -9,7 +9,9 @@ import type { Config } from "./config.js";
 import {
   archivedRecoveryJob,
   BrowserContextUnavailableError,
+  ConversationPageRegistry,
   FairWorkScheduler,
+  isSameConversationUrl,
   Orchestrator,
   RoundRobinScheduler,
   roundRobinAfter,
@@ -33,6 +35,33 @@ test("継続不能conversationの回復jobは同じURLから重複しないdot j
   assert.equal(first.body, ".");
   assert.equal(first.status, "pending");
   assert.notEqual(first.id, archivedRecoveryJob("https://chatgpt.com/g/g-p-project/c/other").id);
+});
+
+test("conversation pageは同じURLで再利用しended時だけ閉じる", async () => {
+  let closed = false;
+  const page = {
+    isClosed: () => closed,
+    close: async () => {
+      closed = true;
+    },
+  } as unknown as import("playwright").Page;
+  const registry = new ConversationPageRegistry();
+  const url = "https://chatgpt.com/g/g-p-project/c/conversation?x=1#fragment";
+
+  await registry.retain(url, page);
+  assert.equal(registry.get("https://chatgpt.com/g/g-p-project/c/conversation"), page);
+  assert.equal(closed, false);
+
+  await registry.release(url);
+  assert.equal(closed, true);
+  assert.equal(registry.get(url), undefined);
+});
+
+test("同じconversation URLのqueryとfragment差分では再読込しない", () => {
+  const url = "https://chatgpt.com/g/g-p-project/c/conversation";
+  assert.equal(isSameConversationUrl(`${url}?x=1#fragment`, url), true);
+  assert.equal(isSameConversationUrl(`${url}-other`, url), false);
+  assert.equal(isSameConversationUrl("about:blank", url), false);
 });
 
 test("同時実行数1でも全active conversationを巡回する", () => {
