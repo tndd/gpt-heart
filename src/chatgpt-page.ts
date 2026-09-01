@@ -46,12 +46,13 @@ export class ChatGptPage {
     await this.page.goto(url, { waitUntil: "domcontentloaded", timeout: 60_000 });
   }
 
-  async waitForComposer(onWaiting?: () => void): Promise<Locator> {
+  async waitForComposer(onWaiting?: () => void, warningDelayMs = 5_000): Promise<Locator> {
+    const warningAt = Date.now() + warningDelayMs;
     let announced = false;
     for (;;) {
       const composer = await firstVisible(this.page, COMPOSER_SELECTORS);
       if (composer) return composer;
-      if (!announced) {
+      if (!announced && Date.now() >= warningAt) {
         onWaiting?.();
         announced = true;
       }
@@ -84,6 +85,16 @@ export class ChatGptPage {
     if ((await messages.count()) === 0) return null;
     const role = await messages.last().getAttribute("data-message-author-role");
     return role === "user" || role === "assistant" ? role : null;
+  }
+
+  async waitForMessageRole(timeoutMs = 10_000): Promise<"user" | "assistant"> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const role = await this.lastMessageRole();
+      if (role) return role;
+      await this.page.waitForTimeout(this.pollIntervalMs);
+    }
+    throw new Error("Timed out waiting for ChatGPT messages to become ready");
   }
 
   async assistantCount(): Promise<number> {
