@@ -40,6 +40,7 @@ const UNAVAILABLE_TEXTS = [
   "会話が削除されました",
 ];
 const MESSAGE_SELECTOR = '[data-message-author-role="user"], [data-message-author-role="assistant"]';
+const USER_SELECTOR = '[data-message-author-role="user"]';
 const ASSISTANT_SELECTOR = '[data-message-author-role="assistant"]';
 
 export function fingerprint(text: string): string {
@@ -100,7 +101,9 @@ export class ChatGptPage {
         return { kind: "unavailable" };
       }
       const composer = await firstVisible(this.page, COMPOSER_SELECTORS);
-      if (composer) return { kind: "composer", composer };
+      if (composer && (await composer.isEnabled().catch(() => false))) {
+        return { kind: "composer", composer };
+      }
       const messageCount = await this.page.locator(MESSAGE_SELECTOR).count();
       if (
         messageCount === 0 &&
@@ -128,6 +131,8 @@ export class ChatGptPage {
     onBeforeClick?: () => Promise<void>,
   ): Promise<void> {
     const composer = await this.waitForComposer(onWaiting);
+    const previousUserCount = await this.userCount();
+    const previousAssistantCount = await this.assistantCount();
     await composer.fill(text);
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
@@ -135,6 +140,7 @@ export class ChatGptPage {
       if (button && (await button.isEnabled().catch(() => false))) {
         await onBeforeClick?.();
         await button.click();
+        await this.waitForSendAcknowledged(text, previousUserCount, previousAssistantCount);
         return;
       }
       await this.page.waitForTimeout(200);
@@ -161,6 +167,33 @@ export class ChatGptPage {
 
   async assistantCount(): Promise<number> {
     return this.page.locator(ASSISTANT_SELECTOR).count();
+  }
+
+  async userCount(): Promise<number> {
+    return this.page.locator(USER_SELECTOR).count();
+  }
+
+  async waitForSendAcknowledged(
+    text: string,
+    previousUserCount: number,
+    previousAssistantCount: number,
+    timeoutMs = 30_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const users = this.page.locator(USER_SELECTOR);
+      const count = await users.count();
+      if (
+        count > previousUserCount &&
+        (await users.last().innerText()).trim() === text.trim()
+      ) {
+        return;
+      }
+      if (await firstVisible(this.page, STOP_SELECTORS)) return;
+      if ((await this.assistantCount()) > previousAssistantCount) return;
+      await this.page.waitForTimeout(this.pollIntervalMs);
+    }
+    throw new Error("Timed out waiting for ChatGPT to acknowledge the sent message");
   }
 
   async latestAssistant(): Promise<{ text: string; hash: string } | null> {
